@@ -1,0 +1,11 @@
+# dsh-cleaner 的组合层：把插件行插入组合树。
+- insert:
+    - id: dsh-cleaner
+      name: dsh-cleaner
+      config:
+        # 不想显示 / 不想清理的目标 id 列在这里，host 会整项跳过。
+        # 可用的 id：dsh-search dsh-image dsh-spill uv npm pnpm pip temp-old updater-installers
+        # 例：先只看不动 pnpm
+        # exclude:
+        #   - pnpm
+        exclude: []
