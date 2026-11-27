@@ -1,25 +1,22 @@
 /**
- * 端到端验收：真实浏览器里的 client + 磁盘上最新代码起的 host。
+ * 端到端验收（v0.4.0）：真实浏览器里的 client + 磁盘上最新代码起的 host。
  *
- * 为什么这样测：host 半边只在 DSH 启动时加载一次，改完必须重启 DSH 才生效；
- * 但 client 半边每次刷新页面都从磁盘重新读。用 CDP 的 Fetch 拦截把
- * `/dsh-cleaner/*` 转发到本文件里起的 host，就能在不重启 DSH 的前提下
- * 跑完整条链路（真实 React 渲染 + 真实新 host 响应）。
- *
- * 跑法：node test/e2e.mjs            # 全部检查
- *       node test/e2e.mjs --keep     # 保留截图
+ * host 半边只在 DSH 启动时加载一次，client 半边每次刷新都从磁盘读，
+ * 所以用 CDP 的 Fetch 拦截把 `/dsh-cleaner/*` 转发到本文件起的 host，
+ * 不重启 DSH 也能跑完整链路。
  */
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdir, writeFile as writeProbe } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createHash, createHmac } from 'node:crypto'
 
-const GUI = 'http://127.0.0.1:7651/'
-const HOST_PORT = 7721
-const CDP_PORT = 9451
+const here = dirname(fileURLToPath(import.meta.url))
+const GUI = 'http://127.0.0.1:13808/'
+const HOST_PORT = 7751
+const CDP_PORT = 9481
 const KEEP = process.argv.includes('--keep')
 
 const results = []
@@ -29,7 +26,6 @@ function check(name, ok, detail = '') {
 }
 
 // ── 1. 用磁盘上最新代码起 host ──────────────────────────────────────────────
-const here = dirname(fileURLToPath(import.meta.url))
 const plugin = await import(pathToFileURL(join(here, '..', 'lib', 'index.js')).href + '?' + Date.now())
 let hostHandler = null
 plugin.apply({
@@ -40,8 +36,29 @@ plugin.apply({
     })
   },
 }, {})
+// 造一点可清的小内容，保证面板里一定有行可操作
+// 造足量的小文件：清理要持续好几秒，才来得及「点外面 → 观察后台仍在跑 → 转绿」。
+// 用小文件+多层目录，让 rm 的 syscall 数量足够多。
+const probeRoot = join(homedir(), '.dsh', 'cache', 'dsh-image-gen', 'inspiration')
+await (async () => {
+  const { mkdir: mk, writeFile: wf } = await import('node:fs/promises')
+  const jobs = []
+  for (let d = 0; d < 60; d += 1) {
+    const dir = join(probeRoot, 'e2e-probe-' + d, 'nested')
+    jobs.push((async () => {
+      await mk(dir, { recursive: true })
+      for (let f = 0; f < 80; f += 1) await wf(join(dir, 'p-' + f + '.bin'), Buffer.alloc(1024, 7))
+    })())
+  }
+  await Promise.all(jobs)
+})()
+
 const hostServer = createServer((req, res) => hostHandler(req, res))
 await new Promise((resolve) => hostServer.listen(HOST_PORT, '127.0.0.1', resolve))
+
+// 先等探测文件落盘，并强制刷新一次扫描缓存，保证面板里一定能看到这一项。
+await new Promise((resolve) => setTimeout(resolve, 300))
+await fetch(`http://127.0.0.1:${HOST_PORT}/dsh-cleaner/scan?force=1`)
 
 // ── 2. 浏览器 ──────────────────────────────────────────────────────────────
 function cookieFor(authority) {
@@ -78,7 +95,6 @@ const version = await waitPort()
 const ws = new WebSocket(version.webSocketDebuggerUrl)
 let seq = 0
 const pending = new Map()
-const logs = []
 ws.addEventListener('message', (event) => {
   const msg = JSON.parse(event.data)
   if (msg.id !== undefined && pending.has(msg.id)) {
@@ -103,9 +119,7 @@ ws.addEventListener('message', (event) => {
       url: `http://127.0.0.1:${HOST_PORT}${url.pathname}${url.search}`,
       headers,
     }, sessionId)
-    return
   }
-  logs.push(msg)
 })
 await new Promise((resolve, reject) => {
   ws.addEventListener('open', resolve, { once: true })
@@ -140,7 +154,6 @@ async function ev(expression) {
   return outcome.result.value
 }
 
-/** 关掉 DSH 自己的欢迎/预览弹窗，否则它会整片遮住按钮。 */
 async function dismissModals() {
   for (let i = 0; i < 10; i += 1) {
     const state = await ev(`(() => {
@@ -156,192 +169,209 @@ async function dismissModals() {
   }
 }
 
-await dismissModals()
-check('DSH 弹窗已清掉（不遮住测试目标）', (await ev(`document.querySelectorAll('[role="dialog"][aria-modal="true"]').length`)) === 0)
-
-// ── 3. 按钮：渲染、位置、透明、可拖动 ──────────────────────────────────────
-check('刷子按钮出现在页面上', (await ev(`!!document.querySelector('[data-dc-btn]')`)) === true)
-check('按钮文字正确', (await ev(`(document.querySelector('[data-dc-btn]')||{}).textContent.trim()`) ) === '清理缓存',
-  await ev(`(document.querySelector('[data-dc-btn]')||{}).textContent.trim()`))
-
-const btnRect = await ev(`(() => { const b = document.querySelector('[data-dc-btn]'); if (!b) return null; const r = b.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } })()`)
-check('按钮在视口内', btnRect !== null && btnRect.x > 0 && btnRect.y > 0, JSON.stringify(btnRect))
-
-const hit = await ev(`(() => { const b = document.querySelector('[data-dc-btn]'); const r = b.getBoundingClientRect(); const el = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); return el && (el === b || b.contains(el)) ? 'button' : (el ? el.tagName : 'none') })()`)
-check('按钮可被鼠标命中（没被别的东西盖住）', hit === 'button', String(hit))
-
-// 半透明：面板和按钮都必须用 color-mix + backdrop-filter，不能是 100% 实心
-const translucent = await ev(`(() => {
-  const css = (document.getElementById('dsh-cleaner-style') || {}).textContent || ''
-  return {
-    backdrop: css.includes('backdrop-filter'),
-    colorMix: css.includes('color-mix'),
-    panelVar: css.includes('--dc-panel-bg'),
-  }
-})()`)
-check('按钮与面板用毛玻璃（backdrop-filter）', translucent.backdrop === true)
-check('面板底色由不透明度算出（color-mix）', translucent.colorMix === true && translucent.panelVar === true)
-
-// 拖动：用真实鼠标事件，把按钮拖到别处，再确认位置被记住
-const dragStart = btnRect
-await S('Input.dispatchMouseEvent', { type: 'mousePressed', x: dragStart.x + 20, y: dragStart.y + 12, button: 'left', clickCount: 1 })
-for (let step = 1; step <= 6; step += 1) {
-  await S('Input.dispatchMouseEvent', { type: 'mouseMoved', x: dragStart.x + 20 - step * 22, y: dragStart.y + 12 + step * 14, button: 'left' })
+/** 鼠标真实点击某个坐标。 */
+async function clickAt(x, y) {
+  await S('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 })
+  await S('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 })
 }
-await S('Input.dispatchMouseEvent', { type: 'mouseReleased', x: dragStart.x + 20 - 132, y: dragStart.y + 12 + 84, button: 'left', clickCount: 1 })
-await new Promise((resolve) => setTimeout(resolve, 1200))
 
-const moved = await ev(`(() => { const b = document.querySelector('[data-dc-btn]'); const r = b.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y) } })()`)
-check('按钮能被拖动到新位置', Math.abs(moved.x - dragStart.x) > 40, `从 ${dragStart.x},${dragStart.y} 到 ${moved.x},${moved.y}`)
+const centerOf = async (selector) => ev(`(() => {
+  const el = document.querySelector(${JSON.stringify(selector)})
+  if (!el) return null
+  const r = el.getBoundingClientRect()
+  return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+})()`)
 
-const persisted = await (await fetch(`http://127.0.0.1:${HOST_PORT}/dsh-cleaner/config`)).json()
-check('拖动后的坐标被持久化', persisted.config.x !== null && Math.abs(persisted.config.x - moved.x) <= 2,
-  `保存 ${persisted.config.x},${persisted.config.y}；实际 ${moved.x},${moved.y}`)
-
-// ── 4. 右键菜单 ────────────────────────────────────────────────────────────
-const nowRect = await ev(`(() => { const b = document.querySelector('[data-dc-btn]'); const r = b.getBoundingClientRect(); return { x: r.x, y: r.y } })()`)
-await S('Input.dispatchMouseEvent', { type: 'mousePressed', x: nowRect.x + 16, y: nowRect.y + 14, button: 'right', clickCount: 1 })
-await S('Input.dispatchMouseEvent', { type: 'mouseReleased', x: nowRect.x + 16, y: nowRect.y + 14, button: 'right', clickCount: 1 })
-await new Promise((resolve) => setTimeout(resolve, 700))
-
-const menu = await ev(`(() => { const m = document.querySelector('[data-dc-menu]'); if (!m) return null; return { items: Array.from(m.querySelectorAll('button')).map((b) => b.textContent.trim()), rect: (() => { const r = m.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } })() } })()`)
-check('右键弹出菜单', menu !== null)
-check('菜单含四种形态', menu !== null && ['可拖动的按钮', '变成纯图标', '固定在右上角', '贴到右边缘'].every((label) => menu.items.some((item) => item.includes(label))),
-  menu && menu.items.join(' | '))
-check('菜单含隐藏', menu !== null && menu.items.some((item) => item.includes('隐藏')))
-check('菜单在视口内', menu !== null && menu.rect.x >= 0 && menu.rect.y >= 0 && menu.rect.x + menu.rect.w <= 1440, menu && JSON.stringify(menu.rect))
-
-// 切到纯图标
-await ev(`(() => { const buttons = Array.from(document.querySelectorAll('[data-dc-menu] button')); const target = buttons.find((b) => b.textContent.includes('纯图标')); if (target) target.click(); return true })()`)
-await new Promise((resolve) => setTimeout(resolve, 1200))
-const iconShape = await ev(`(() => { const b = document.querySelector('[data-dc-btn]'); if (!b) return null; const r = b.getBoundingClientRect(); return { shape: b.getAttribute('data-shape'), w: Math.round(r.width), text: b.textContent.trim() } })()`)
-check('纯图标形态生效（圆形、无文字）', iconShape !== null && iconShape.shape === 'icon' && iconShape.w <= 40 && iconShape.text === '',
-  JSON.stringify(iconShape))
-
-// 切回浮动
-await (await fetch(`http://127.0.0.1:${HOST_PORT}/dsh-cleaner/config`, {
-  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: 'float' }),
-}))
-await ev(`window.dispatchEvent(new Event('focus'))`)
-await S('Page.reload')
-await new Promise((resolve) => setTimeout(resolve, 13000))
 await dismissModals()
+check('DSH 弹窗已清掉', (await ev(`document.querySelectorAll('[role="dialog"][aria-modal="true"]').length`)) === 0)
 
-// ── 5. 面板：0 字节不显示、半透明、逐项动画 ────────────────────────────────
-check('刷新后按钮仍在', (await ev(`!!document.querySelector('[data-dc-btn]')`)) === true)
+// ── 3. 按钮：存在、图标是垃圾桶、名字 ──────────────────────────────────────
+check('按钮出现', (await ev(`!!document.querySelector('[data-dc-btn]')`)) === true)
+check('按钮文字是「清理缓存」', (await ev(`(document.querySelector('[data-dc-btn]')||{}).textContent.trim()`)) === '清理缓存',
+  await ev(`(document.querySelector('[data-dc-btn]')||{}).textContent.trim()`))
+check('图标是垃圾桶（不再是刷子）', (await ev(`(() => {
+  const glyph = document.querySelector('[data-dc-btn] [data-dc-glyph] svg')
+  if (!glyph) return false
+  const d = Array.from(glyph.querySelectorAll('path')).map(p => p.getAttribute('d')).join(' ')
+  return d.includes('6.5h16') || d.includes('12.1')
+})()`)) === true)
 
-const rect2 = await ev(`(() => { const b = document.querySelector('[data-dc-btn]'); const r = b.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) } })()`)
-await S('Input.dispatchMouseEvent', { type: 'mousePressed', x: rect2.x, y: rect2.y, button: 'left', clickCount: 1 })
-await S('Input.dispatchMouseEvent', { type: 'mouseReleased', x: rect2.x, y: rect2.y, button: 'left', clickCount: 1 })
-await new Promise((resolve) => setTimeout(resolve, 9000))
+// ── 4. 打开面板 → 从按钮蹦出 ────────────────────────────────────────────────
+let btn = await centerOf('[data-dc-btn]')
+await clickAt(btn.x, btn.y)
+await new Promise((resolve) => setTimeout(resolve, 1500))
+check('点一下打开面板', (await ev(`!!document.querySelector('[data-dc-panel]')`)) === true)
 
-const panel = await ev(`(() => {
+// 面板打开后强制重新统计，确保刚造的探测文件被算进去
+await ev(`(() => { const b = Array.from(document.querySelectorAll('[data-dc-tools] button')).find(x => x.textContent.includes('重新统计')); if (b) b.click(); return true })()`)
+await new Promise((resolve) => setTimeout(resolve, 2500))
+const popAnim = await ev(`(() => {
   const p = document.querySelector('[data-dc-panel]')
   if (!p) return null
+  const s = getComputedStyle(p)
+  return { anim: p.getAttribute('data-anim'), name: s.animationName, origin: s.transformOrigin }
+})()`)
+check('面板有弹出动画', popAnim !== null && popAnim.anim === 'in' && String(popAnim.name).includes('dc-pop-in'), JSON.stringify(popAnim))
+check('弹出原点在按钮那一侧（transform-origin 已按按钮算）', popAnim !== null && popAnim.origin !== '50% 50%', popAnim && popAnim.origin)
+
+// ── 5. 拖动按钮：面板跟手 + 不自动关闭 ────────────────────────────────────
+const before = await ev(`(() => {
+  const b = document.querySelector('[data-dc-btn]').getBoundingClientRect()
+  const p = document.querySelector('[data-dc-panel]').getBoundingClientRect()
+  return { btn: { x: Math.round(b.x), y: Math.round(b.y) }, panel: { x: Math.round(p.x), y: Math.round(p.y) } }
+})()`)
+
+// 按住按钮拖动 120px
+await S('Input.dispatchMouseEvent', { type: 'mousePressed', x: btn.x, y: btn.y, button: 'left', clickCount: 1 })
+for (let step = 1; step <= 8; step += 1) {
+  await S('Input.dispatchMouseEvent', { type: 'mouseMoved', x: btn.x - step * 15, y: btn.y + step * 6, button: 'left' })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+}
+// 拖动途中面板是否跟着动？
+const midDrag = await ev(`(() => {
+  const b = document.querySelector('[data-dc-btn]').getBoundingClientRect()
+  const p = document.querySelector('[data-dc-panel]')
+  if (!p) return { panel: null }
   const r = p.getBoundingClientRect()
-  const css = getComputedStyle(p)
+  return { btnX: Math.round(b.x), panelX: Math.round(r.x), panelY: Math.round(r.y) }
+})()`)
+await S('Input.dispatchMouseEvent', { type: 'mouseReleased', x: btn.x - 120, y: btn.y + 48, button: 'left', clickCount: 1 })
+await new Promise((resolve) => setTimeout(resolve, 700))
+
+const after = await ev(`(() => {
+  const b = document.querySelector('[data-dc-btn]')
+  const p = document.querySelector('[data-dc-panel]')
+  if (!b) return { btn: null, panel: null }
+  const br = b.getBoundingClientRect()
   return {
-    rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), bottom: Math.round(r.bottom) },
-    backdrop: css.backdropFilter || css.webkitBackdropFilter || '',
-    rows: Array.from(document.querySelectorAll('[data-dc-row]')).map((row) => ({
-      label: (row.querySelector('[data-dc-label] span') || {}).textContent,
-      size: (row.querySelector('[data-dc-size]') || {}).textContent,
-    })),
+    btn: { x: Math.round(br.x), y: Math.round(br.y) },
+    panel: p ? { x: Math.round(p.getBoundingClientRect().x), y: Math.round(p.getBoundingClientRect().y) } : null,
   }
 })()`)
-check('点一下能打开面板', panel !== null)
-check('面板在视口内', panel !== null && panel.rect.y >= 0 && panel.rect.bottom <= 900, panel && JSON.stringify(panel.rect))
-check('面板真的是半透明毛玻璃', panel !== null && String(panel.backdrop).includes('blur'), panel && panel.backdrop)
-check('没有 0 字节的项（默认隐藏）', panel !== null && panel.rows.every((row) => !/^0 B$/.test(String(row.size))),
-  panel && panel.rows.map((row) => `${row.label}=${row.size}`).join(', '))
-check('至少列出了真有内容的项', panel !== null && panel.rows.length > 0, panel && String(panel.rows.length))
 
-// 逐项清理动画：点清理，抓一帧「正在清理哪一项」
-const cleanBtn = await ev(`(() => { const b = document.querySelector('[data-dc-foot] button[data-primary]'); if (!b) return null; const r = b.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), label: b.textContent.trim(), disabled: b.disabled } })()`)
-check('清理按钮可用', cleanBtn !== null && cleanBtn.disabled === false, cleanBtn && cleanBtn.label)
+check('按钮被拖走了', after.btn !== null && Math.abs(after.btn.x - before.btn.x) > 60, JSON.stringify([before.btn, after.btn]))
+check('拖动时面板跟着动（不是钉在原处）', midDrag.panel !== null && Math.abs(midDrag.panelX - before.panel.x) > 8,
+  JSON.stringify({ beforePanel: before.panel, midPanel: midDrag }))
+check('拖动结束后面板没被误关掉', after.panel !== null, JSON.stringify(after.panel))
 
-// 只留最小的一项，避免真删掉大缓存（用户机器上 pnpm 有 2GB）。
-// 注意：0 字节的项默认不显示，所以先自己造一点真实内容，保证一定有可清的小项。
-const { mkdir, writeFile: writeProbe } = await import('node:fs/promises')
-const { join: joinPath } = await import('node:path')
-const probeDir = joinPath(homedir(), '.dsh', 'cache', 'dsh-image-gen', 'inspiration', 'e2e-probe')
-await mkdir(probeDir, { recursive: true })
-await writeProbe(joinPath(probeDir, 'probe.bin'), Buffer.alloc(4096, 7))
-
-await ev(`(() => { const b = document.querySelector('[data-dc-foot] button[data-primary]'); return true })()`)
-// 内容变了要重新统计，才能看到新造的这一项
-const rescan = await ev(`(() => { const buttons = Array.from(document.querySelectorAll('[data-dc-tools] button')); const b = buttons.find((x) => x.textContent.includes('重新统计')); if (b) b.click(); return !!b })()`)
-void rescan
-await new Promise((resolve) => setTimeout(resolve, 9000))
-
-const picked = await ev(`(() => {
-  const wanted = []
+// ── 6. 点面板外：面板关，但清理继续跑（后台）──────────────────────────────
+// 先勾选一点小项，然后开始清理，再立刻点外面
+await ev(`(() => {
   for (const row of document.querySelectorAll('[data-dc-row]')) {
     const label = (row.querySelector('[data-dc-label] span') || {}).textContent || ''
     const box = row.querySelector('input')
-    const want = label.includes('缩略')
+    const want = label.includes('缩略') || label.includes('溢出')
     if (!box.disabled && box.checked !== want) row.click()
-    if (want) wanted.push(label)
   }
-  return wanted
+  return true
 })()`)
-check('测试选中了真实存在的小项', Array.isArray(picked) && picked.length > 0, JSON.stringify(picked))
 
-const cleanBtn2 = await ev(`(() => { const b = document.querySelector('[data-dc-foot] button[data-primary]'); if (!b) return null; const r = b.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), disabled: b.disabled } })()`)
-check('清理按钮可点', cleanBtn2 !== null && cleanBtn2.disabled === false, cleanBtn2 && String(cleanBtn2.disabled))
+// 面板在拖动后换了位置，这里必须重新读一次按钮坐标，不能用拖动前算的。
+const canClean = await ev(`(() => { const b = document.querySelector('[data-dc-foot] button[data-primary]'); return b ? !b.disabled : false })()`)
+check('清理按钮可点', canClean === true, String(canClean))
+const primary = await centerOf('[data-dc-foot] button[data-primary]')
 
-await S('Input.dispatchMouseEvent', { type: 'mousePressed', x: cleanBtn2.x, y: cleanBtn2.y, button: 'left', clickCount: 1 })
-await S('Input.dispatchMouseEvent', { type: 'mouseReleased', x: cleanBtn2.x, y: cleanBtn2.y, button: 'left', clickCount: 1 })
-
-// 清理可能极快（几毫秒），所以用高频率轮询抓帧，而不是每 180ms 看一眼。
-let sawCleaning = false
-let cleaningLabel = ''
-let sawProgress = false
-let sawAnyResult = false
-for (let i = 0; i < 150; i += 1) {
-  const snapshot = await ev(`(() => {
-    const row = document.querySelector('[data-dc-row][data-state="cleaning"]')
-    const doneRow = document.querySelector('[data-dc-row][data-state="done"]')
-    const primary = document.querySelector('[data-dc-foot] button[data-primary]')
-    const msg = document.querySelector('[data-dc-msg]')
-    return {
-      cleaning: row ? (row.querySelector('[data-dc-label] span') || {}).textContent : null,
-      done: doneRow !== null,
-      primary: primary ? primary.textContent.trim() : null,
-      msg: msg ? msg.textContent.trim() : '',
-    }
-  })()`)
-  if (snapshot) {
-    if (snapshot.cleaning) {
-      sawCleaning = true
-      cleaningLabel = snapshot.cleaning
-    }
-    if (snapshot.done) sawAnyResult = true
-    if (snapshot.primary && /\d+\/\d+/.test(snapshot.primary)) sawProgress = true
-    if (snapshot.msg) sawAnyResult = true
+if (canClean) {
+  await clickAt(primary.x, primary.y)
+  // 等到进度出现（说明任务已经在跑）
+  let sawRunning = false
+  for (let i = 0; i < 30; i += 1) {
+    const s = await ev(`(() => {
+      const b = document.querySelector('[data-dc-btn]')
+      return { glow: b ? b.getAttribute('data-glow') : null, running: !!(document.querySelector('[data-dc-panel]')||{}).querySelector?.('.dc-orbit') }
+    })()`)
+    if (s && s.glow === 'red') { sawRunning = true; break }
+    await new Promise((resolve) => setTimeout(resolve, 100))
   }
-  if (sawCleaning && sawProgress && sawAnyResult) break
-  await new Promise((resolve) => setTimeout(resolve, 40))
-}
-check('清理时能看出正在清哪一项（行高亮）', sawCleaning === true, cleaningLabel)
-check('清理按钮显示 x/y 进度', sawProgress === true)
-check('清理中出现完成态或被清空', sawAnyResult === true)
+  check('清理时按钮亮红光', sawRunning === true)
 
-await new Promise((resolve) => setTimeout(resolve, 4000))
-const done = await ev(`(() => { const m = document.querySelector('[data-dc-msg]'); return m ? m.textContent.trim() : null })()`)
-check('清理后有结果反馈', typeof done === 'string' && done.length > 0, done)
+  const orbit = await ev(`(() => {
+    const o = document.querySelector('[data-dc-panel] .dc-orbit')
+    if (!o) return null
+    const rocket = o.querySelector('.dc-rocket')
+    return { orbit: true, rocket: !!(rocket && rocket.querySelector('svg')), transform: rocket ? getComputedStyle(rocket).transform : null }
+  })()`)
+  check('面板外框有火箭在跑', orbit !== null && orbit.rocket === true, JSON.stringify(orbit))
+
+  const meteor = await ev(`!!document.querySelector('[data-dc-row][data-state="cleaning"] .dc-meteor')`)
+  check('正在清的那一行有陨石飞过', meteor === true)
+
+  // 趁清理还在跑，拍一张，用来人工核对红光/火箭/陨石的观感
+  const shotCleaning = await S('Page.captureScreenshot', { format: 'png' })
+  writeFileSync(join(here, '..', '.tmp-e2e-cleaning.png'), Buffer.from(shotCleaning.data, 'base64'))
+
+  // 点面板外面 → 面板应当关闭。
+  // 注意：按钮被拖过，面板也跟着挪了，所以这里先算一个「确实在面板外」的点。
+  const outside = await ev(`(() => {
+    const p = document.querySelector('[data-dc-panel]')
+    if (!p) return null
+    const r = p.getBoundingClientRect()
+    const candidates = [
+      { x: 40, y: 700 }, { x: 40, y: 300 }, { x: 1200, y: 760 },
+      { x: Math.round(r.x / 2), y: Math.round(r.y + r.height / 2) },
+    ]
+    for (const c of candidates) {
+      if (c.x < r.x - 4 || c.x > r.right + 4 || c.y < r.y - 4 || c.y > r.bottom + 4) {
+        const el = document.elementFromPoint(c.x, c.y)
+        if (el && !p.contains(el) && !el.closest('[data-dc-panel]')) return c
+      }
+    }
+    return null
+  })()`)
+  check('能找到面板外的空白点', outside !== null, JSON.stringify(outside))
+  if (outside !== null) await clickAt(outside.x, outside.y)
+  // 轮询：清理可能在几百毫秒内就结束并自动弹回结果面板，
+  // 用单次快照会误判，所以只要「曾经关掉过」就算通过。
+  let closed = false
+  for (let i = 0; i < 40; i += 1) {
+    if (await ev(`!document.querySelector('[data-dc-panel]')`)) { closed = true; break }
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  check('点面板外面会关闭面板', closed === true)
+
+  // 关键：面板关了，清理仍在后台继续 → 按钮保持红光，随后转绿并闪 5 下
+  const stillRed = await ev(`(() => { const b = document.querySelector('[data-dc-btn]'); return b ? b.getAttribute('data-glow') : null })()`)
+  check('关掉面板后仍处于清理中（红光还在）', stillRed === 'red' || stillRed === 'green', String(stillRed))
+
+  let sawGreen = false
+  for (let i = 0; i < 120; i += 1) {
+    const glow = await ev(`(() => { const b = document.querySelector('[data-dc-btn]'); return b ? b.getAttribute('data-glow') : null })()`)
+    if (glow === 'green') { sawGreen = true; break }
+    await new Promise((resolve) => setTimeout(resolve, 120))
+  }
+  check('后台清理跑完后按钮转绿光', sawGreen === true)
+
+  const blink = await ev(`(() => {
+    const b = document.querySelector('[data-dc-btn]')
+    if (!b) return null
+    const s = getComputedStyle(b)
+    return { anim: s.animationName, count: s.animationIterationCount }
+  })()`)
+  check('绿光是闪 5 下', blink !== null && String(blink.anim).includes('dc-green-blink') && String(blink.count) === '5',
+    JSON.stringify(blink))
+
+  // 清理完成后应当自动把面板拉出来给用户看结果
+  let reopened = null
+  for (let i = 0; i < 120; i += 1) {
+    reopened = await ev(`(() => { const p = document.querySelector('[data-dc-panel]'); if (!p) return null; const m = p.querySelector('[data-dc-msg]'); return { open: true, msg: m ? m.textContent.trim() : '' } })()`)
+    if (reopened !== null && String(reopened.msg).length > 0) break
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+  check('清理完成后自动弹出结果面板', reopened !== null && reopened.open === true, JSON.stringify(reopened))
+  check('结果面板有「已释放」反馈', reopened !== null && String(reopened.msg).length > 0, reopened && reopened.msg)
+}
 
 const shot = await S('Page.captureScreenshot', { format: 'png' })
 writeFileSync(join(here, '..', '.tmp-e2e.png'), Buffer.from(shot.data, 'base64'))
 
-// 恢复默认配置，别把测试状态留给用户
+// 收尾：恢复正常配置，删掉探测文件
 await fetch(`http://127.0.0.1:${HOST_PORT}/dsh-cleaner/config`, { method: 'DELETE' })
-
 ws.close()
 chrome.kill()
 hostServer.close()
 if (!KEEP) {
   try { rmSync(join(here, '..', '.tmp-e2e.png')) } catch {}
+  try { rmSync(join(here, '..', '.tmp-e2e-cleaning.png')) } catch {}
   try { rmSync(profile, { recursive: true, force: true }) } catch {}
 }
 

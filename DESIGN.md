@@ -1,4 +1,4 @@
-# dsh-cleaner 设计交接
+# C Disk Cleaner (dsh-cleaner) 设计交接
 
 ## 一、目标
 

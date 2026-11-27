@@ -93,8 +93,14 @@ const sandbox = {
     }
     return { ok: true, json: async () => ({ items: [], totalBytes: 0 }), text: async () => '{}' }
   },
-  setTimeout: (fn) => { if (typeof fn === 'function') fn(); return 0 },
-  clearTimeout() {},
+  // 只让 0ms（下一拍）立即执行，其余走真实计时器 —— 否则「庆祝窗口」这种
+  // 定时复位的逻辑会被瞬间跑掉，测不到。
+  setTimeout: (fn, delay) => {
+    if (typeof fn !== 'function') return 0
+    if (!delay) { fn(); return 0 }
+    return globalThis.setTimeout(fn, Math.min(delay, 40))
+  },
+  clearTimeout: (id) => globalThis.clearTimeout(id),
 }
 sandbox.globalThis = sandbox
 createContext(sandbox)
@@ -175,7 +181,11 @@ check('面板用半透明毛玻璃（不是 100% 实心）', css.includes('backd
 check('icon 与 rail 有专门形态样式', css.includes('data-shape="icon"') && css.includes('data-shape="rail"'))
 check('rail 形态贴右边缘', css.includes('data-shape="rail"') && css.includes('translateY(-50%)'))
 check('按钮可拖动时禁掉文本选择', css.includes('touch-action:none') && css.includes('user-select:none'))
-check('清理中的项有扫光动画', css.includes('dc-sweep'))
+check('清理中的项有陨石飞过动画', css.includes('dc-meteor-fly') && css.includes('dc-meteor'))
+check('面板外框有火箭绕行', css.includes('dc-orbit') && css.includes('.dc-rocket'))
+check('清理时按钮亮红光', css.includes('dc-red-pulse') && css.includes('data-glow="red"'))
+check('完成后按钮闪绿光 5 下', css.includes('dc-green-blink') && /\.52s ease-in-out 5/.test(css))
+check('面板有弹出/收回动画', css.includes('dc-pop-in') && css.includes('dc-pop-out'))
 check('尊重减少动效偏好', css.includes('prefers-reduced-motion'))
 
 // ── 首屏渲染 ────────────────────────────────────────────────────────────────
@@ -223,8 +233,8 @@ check('配置加载前渲染为 null（避免位置闪烁）', tree === null, St
 let readyTree = null
 try {
   const internals = exported.__internals
-  internals.store.config = { mode: 'float', x: null, y: null, opacity: 0.88, showEmpty: false, autoExpand: false, disabled: [] }
-  internals.store.hidden = false
+  internals.configStore.config = { mode: 'float', x: null, y: null, opacity: 0.88, showEmpty: false, autoExpand: false, disabled: [] }
+  internals.configStore.hidden = false
   readyTree = render(overlay.component({}))
   check('配置到位后渲染成功', readyTree !== null && typeof readyTree === 'object')
 } catch (error) {
@@ -244,13 +254,13 @@ check('按钮支持拖动（pointer 事件齐全）', button !== null &&
 // 隐藏状态：store.hidden 后应当什么都不画（右键隐藏直到下次打开）。
 let hiddenTree = null
 try {
-  exported.__internals.store.hidden = true
+  exported.__internals.configStore.hidden = true
   hiddenTree = render(overlay.component({}))
 } catch (error) {
   hiddenTree = { error }
 }
 check('隐藏后不渲染任何东西', hiddenTree === null, JSON.stringify(hiddenTree))
-exported.__internals.store.hidden = false
+exported.__internals.configStore.hidden = false
 
 // 设置页：能渲染出四种形态的选项和各个开关。
 let settingsTree = null
@@ -277,6 +287,49 @@ if (internals !== undefined) {
   check('clampPosition 不让按钮跑出左上角', clamped.x >= 0 && clamped.y >= 0, JSON.stringify(clamped))
   const far = internals.clampPosition(99999, 99999, { w: 80, h: 36 })
   check('clampPosition 不让按钮跑出右下角', far.x <= 1440 && far.y <= 900, JSON.stringify(far))
+}
+
+// ── 后台清理任务：面板卸载后仍然继续 ────────────────────────────────────────
+{
+  const internals = exported.__internals
+  const job = internals.job
+  const calls = []
+  const originalFetch = sandbox.fetch
+  // 让 /clean-item 可控地「慢」一点，才能观察到「面板已关、任务仍在跑」。
+  sandbox.fetch = async (path, init) => {
+    const url = String(path)
+    if (url.includes('/clean-item')) {
+      calls.push(url)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      return { ok: true, text: async () => JSON.stringify({ id: url.split('id=')[1], freed: 1024, skipped: 0 }) }
+    }
+    return { ok: true, text: async () => JSON.stringify({ items: [], totalBytes: 0, disk: null }) }
+  }
+  globalThis.fetchBackup = originalFetch
+
+  job.reset()
+  const queue = [
+    { id: 'a', label: 'A', bytes: 1024 },
+    { id: 'b', label: 'B', bytes: 2048 },
+  ]
+  const running = job.run(queue, (key) => key)
+  check('清理任务开始后 phase=running', job.phase === 'running')
+  // 模拟「用户把面板关掉」：任务对象根本不依赖组件，应该继续推进。
+  await new Promise((resolve) => setTimeout(resolve, 1))
+  await running
+  check('面板关了清理照样跑完', job.phase === 'done')
+  check('两项都调用了 clean-item', calls.length === 2, String(calls.length))
+  check('累计释放量正确', job.freed === 2048, String(job.freed))
+  check('每项都记了完成态', job.rows.a.state === 'done' && job.rows.b.state === 'done')
+  check('完成后进入庆祝窗口（绿光）', job.celebrateUntil > Date.now())
+  sandbox.fetch = originalFetch
+}
+
+// ── 名字 ────────────────────────────────────────────────────────────────────
+{
+  const internals = exported.__internals
+  check('展示名是 C Disk Cleaner', internals.DISPLAY_NAME === 'C Disk Cleaner', internals.DISPLAY_NAME)
+  check('中英文案里都带新名字', internals.LEX.zh['app.name'] === 'C Disk Cleaner' && internals.LEX.en['app.name'] === 'C Disk Cleaner')
 }
 
 // ── 文案完整性 ──────────────────────────────────────────────────────────────

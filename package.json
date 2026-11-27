@@ -1,16 +1,19 @@
 {
   "name": "dsh-cleaner",
-  "version": "0.3.0",
-  "description": "DSH 右上角常驻一枚小刷子：可拖动、可固定、可变成纯图标，点开就能看各项缓存占多大并一键清理，释放 C 盘空间。",
+  "version": "0.4.0",
+  "description": "C Disk Cleaner — 右上角一枚小垃圾桶，随时点一下清理 DSH 缓存、释放 C 盘空间。可拖动，清理时按钮亮红光、完成闪绿光。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./icon": "./icon.svg"
   },
   "files": [
     "lib",
+    "locale",
+    "icon.svg",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
@@ -46,7 +49,8 @@
     "cache",
     "cleaner",
     "disk-space",
-    "cleanup"
+    "cleanup",
+    "c-disk"
   ],
   "license": "MIT",
   "repository": {
