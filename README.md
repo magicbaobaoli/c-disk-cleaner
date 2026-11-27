@@ -141,3 +141,9 @@ node test/e2e.mjs           # 21 项（需 DSH 在 7651/13808 运行）
 ## License
 
 MIT
+
+## 相关链接
+
+- 仓库：<https://github.com/magicbaobaoli/c-disk-cleaner>
+- 更新日志：[CHANGELOG.md](CHANGELOG.md)
+- 设计交接：[DESIGN.md](DESIGN.md)

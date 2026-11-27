@@ -179,14 +179,70 @@ GUI 根页 401 是要浏览器 cookie。cookie 名 = `dsh-auth-` + base64url(sha
 `$DSH_HOME/.credentials.yaml` 的 `client-connection/browser-session.secret`。
 `test/e2e.mjs` 的 `cookieFor()` 就是这段（只读、只发给自己本机）。
 
-## 七、当前状态（2026-11-27）
+## 七、性能（0.4.0）
 
-- 版本 0.3.0。49 + 60 + 27 项测试全绿。
-- 四种形态、拖动记忆、右键菜单、隐藏、设置页、半透明、逐项清理动画
-  全部在真实 GUI 里截图确认过。
-- **host 半边需用户完全退出 DSH 再打开才生效**；client 刷新页面即可。
+实测环境：合成目录树 24000 文件 / 188MB（模拟 pnpm store 量级）。
 
-## 八、下一步建议
+| 操作 | 0.3.0 | 0.4.0 | 提升 |
+| --- | --- | --- | --- |
+| 扫描 | 2030ms | 1043ms | 1.7× |
+| 清理 | 17174ms | 12312ms | 1.4× |
+
+**扫描**：`createLimiter(32)` 三层并发 —— 目标之间、roots 之间、同层目录项之间。
+之前是纯串行 `await`，时间几乎全花在等 syscall 返回。
+
+**清理**：
+1. 去掉「逐条 `measure(full)` 再删」——那等于把整棵树遍历两遍。改成删除前后各量一次
+   root，差值就是真实释放量（实测省 12%）。
+2. 删除本身 8 路并发（`CLEAN_CONCURRENCY`）。Windows 上 `rm` 是同步 syscall 密集的，
+   串行 await 让磁盘队列基本闲置。
+
+注意：清理的绝对耗时由**删除吞吐**决定（实测 serial ≈ parallel(6) ≈ 整棵 rm ≈ 4.9s/78MB），
+所以并行删除的收益主要来自「不再重复遍历」，而不是并发度本身。
+
+## 八、后台任务模型（0.4.0 关键设计）
+
+清理任务 `job` 活在**模块作用域**，不是 React 组件状态：
+
+```
+job = { phase, total, done, freed, rows{}, message, celebrateUntil, autoShowAt, ...emitter }
+job.run(queue, t)  // 逐项调 /clean-item，边跑边 notify()
+```
+
+面板只是它的订阅者。因此：
+
+- 面板卸载（点外面 / 切页面）**不中断清理**
+- 面板重开时从 `job` 读回进度与结果，不丢
+- 清完设 `autoShowAt = now + 3000`，浮层的 effect 在这个窗口内把面板拉出来
+- `celebrateUntil = now + 2600` 驱动按钮绿光闪烁
+
+## 九、动画实现要点
+
+| 效果 | 实现 |
+| --- | --- |
+| 按钮红光 | `@keyframes dc-red-pulse` + `data-glow="red"` |
+| 完成绿光闪 5 下 | `animation: dc-green-blink .52s ease-in-out 5` |
+| 行内陨石 | `.dc-meteor i` 绝对定位 + `@keyframes dc-meteor-fly` 从左飞到右 |
+| 外框火箭绕圈 | rAF 直接改 transform，4 段各 25%，坐标夹在「面板尺寸 − 16px」内 |
+| 外框进度环 | `conic-gradient(from 0deg, ...calc(var(--dc-ring) * 1turn))` + mask 挖空 |
+| 面板蹦出 | `@keyframes dc-pop-in` 缩放，`transform-origin` 按按钮实时算进 CSS 变量 |
+
+**踩过的坑**：火箭起点最初写 `x=-8, y=-8`，配合 `overflow:hidden` 整个被裁掉，
+看起来「没有火箭」。坐标必须是 `0..(尺寸-16)`。
+
+全部动画在 `prefers-reduced-motion: reduce` 下关闭。
+
+## 十、当前状态（2026-11-27）
+
+- 版本 **0.4.0**，显示名 **C Disk Cleaner**（包名仍是 `dsh-cleaner`，profile 接线不变）。
+- 测试：client **61** + host **60** + e2e **21** = **142 项全绿**。
+- 四种形态、拖动记忆、面板跟手、右键菜单、隐藏、设置页、半透明、
+  逐项清理动画、后台清理、红光/绿光/陨石/火箭/进度环，全部在真实 GUI 里验收过。
+- 已发布：<https://github.com/magicbaobaoli/c-disk-cleaner>（原 dsh-cleaner 仓库已改名并 301）。
+- 已向上游目录提 PR：<https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/19398>。
+- **host 半边仍需完全退出 DSH 再打开才生效**；client 刷新页面即可。
+
+## 十一、下一步建议
 
 1. 用户重启 DSH 后确认新形态与新面板。
 2. 想扩清理目标：改 `definitions()`，同步 README/本文件/隐私审计。
