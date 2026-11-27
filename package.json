@@ -14,8 +14,10 @@
     "lib",
     "locale",
     "icon.svg",
+    "assets",
     "cordis.patch.yml",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
