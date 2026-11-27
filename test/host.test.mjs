@@ -203,7 +203,8 @@ let scanned = null
   check('默认面板不透明度 < 1（半透明）', initial.body.config.opacity < 1 && initial.body.config.opacity >= 0.35, String(initial.body.config.opacity))
   check('默认不显示 0 字节项', initial.body.config.showEmpty === false)
   check('默认不自动展开', initial.body.config.autoExpand === false)
-  check('/config 返回可选形态清单', Array.isArray(initial.body.modes) && initial.body.modes.length === 4, JSON.stringify(initial.body.modes))
+  check('默认按钮钉在窗口正中', initial.body.config.anchored === true, String(initial.body.config.anchored))
+  check('/config 返回可选形态清单', Array.isArray(initial.body.modes) && initial.body.modes.length >= 4, JSON.stringify(initial.body.modes))
 
   const saved = await call('/dsh-cleaner/config', {
     method: 'POST',

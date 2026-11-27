@@ -185,7 +185,7 @@ check('清理中的项有陨石飞过动画', css.includes('dc-meteor-fly') && c
 check('面板外框有火箭绕行', css.includes('dc-orbit') && css.includes('.dc-rocket'))
 check('清理时按钮亮红光', css.includes('dc-red-pulse') && css.includes('data-glow="red"'))
 check('完成后按钮闪绿光 5 下', css.includes('dc-green-blink') && /\.52s ease-in-out 5/.test(css))
-check('面板有弹出/收回动画', css.includes('dc-pop-in') && css.includes('dc-pop-out'))
+check('面板用淡入淡出（不做位移缩放）', css.includes('dc-fade-in') && css.includes('dc-fade-out') && !css.includes('dc-pop-in'))
 check('尊重减少动效偏好', css.includes('prefers-reduced-motion'))
 
 // ── 首屏渲染 ────────────────────────────────────────────────────────────────
@@ -246,10 +246,11 @@ check('配置到位后渲染出刷子按钮', button !== null)
 check('按钮有可读的 title（悬停提示）', button !== null && typeof button.props.title === 'string' && button.props.title.length > 3, button && button.props.title)
 check('按钮是 button 元素', button !== null && button.type === 'button')
 check('按钮支持右键菜单', button !== null && typeof button.props.onContextMenu === 'function')
-check('按钮支持拖动（pointer 事件齐全）', button !== null &&
+check('按钮支持拖动（pointerdown/move 在元素上）', button !== null &&
   typeof button.props.onPointerDown === 'function' &&
-  typeof button.props.onPointerMove === 'function' &&
-  typeof button.props.onPointerUp === 'function')
+  typeof button.props.onPointerMove === 'function')
+check('按钮不再自己处理 pointerup（统一走 window，避免一次松手被处理两遍）',
+  button !== null && button.props.onPointerUp === undefined)
 
 // 隐藏状态：store.hidden 后应当什么都不画（右键隐藏直到下次打开）。
 let hiddenTree = null
@@ -330,6 +331,53 @@ if (internals !== undefined) {
   const internals = exported.__internals
   check('展示名是 C Disk Cleaner', internals.DISPLAY_NAME === 'C Disk Cleaner', internals.DISPLAY_NAME)
   check('中英文案里都带新名字', internals.LEX.zh['app.name'] === 'C Disk Cleaner' && internals.LEX.en['app.name'] === 'C Disk Cleaner')
+}
+
+// ── 火箭绕框：位置与朝向 ────────────────────────────────────────────────────
+{
+  const { orbitPlacement } = exported.__internals
+  const W = 400
+  const H = 600
+  const samples = [
+    { p: 0.0, seg: 0, heading: 180, name: '左边缘起点，朝下' },
+    { p: 0.125, seg: 0, heading: 180, name: '左边缘中段，朝下' },
+    { p: 0.25, seg: 1, heading: 90, name: '底边起点，朝右' },
+    { p: 0.375, seg: 1, heading: 90, name: '底边中段，朝右' },
+    { p: 0.5, seg: 2, heading: 0, name: '右边缘起点，朝上' },
+    { p: 0.625, seg: 2, heading: 0, name: '右边缘中段，朝上' },
+    { p: 0.75, seg: 3, heading: -90, name: '顶边起点，朝左' },
+    { p: 0.875, seg: 3, heading: -90, name: '顶边中段，朝左' },
+  ]
+  let allOk = true
+  const detail = []
+  for (const sample of samples) {
+    const got = orbitPlacement(sample.p, W, H)
+    const ok = got.seg === sample.seg && got.heading === sample.heading
+    if (!ok) allOk = false
+    detail.push(`${sample.name}: seg=${got.seg} heading=${got.heading}`)
+  }
+  check('火箭朝向跟前进方向一致（下→右→上→左）', allOk, detail.join(' | '))
+
+  // 四个方向必须真的不同（用户报的就是「只指一个方向」）
+  const headings = new Set([0.1, 0.35, 0.6, 0.85].map((p) => orbitPlacement(p, W, H).heading))
+  check('火箭四个方向各不相同', headings.size === 4, JSON.stringify([...headings]))
+
+  // 位置必须始终在面板内（否则被 overflow:hidden 裁掉）
+  let inside = true
+  for (let i = 0; i <= 100; i += 1) {
+    const got = orbitPlacement(i / 100, W, H)
+    if (got.x < 0 || got.y < 0 || got.x > W - 16 + 0.001 || got.y > H - 16 + 0.001) inside = false
+  }
+  check('火箭全程都在面板内（不会被裁掉）', inside === true)
+
+  // 左下右上的顺序：x 在左边缘不变、底边递增、右边缘不变、顶边递减
+  const left = orbitPlacement(0.1, W, H)
+  const bottom = orbitPlacement(0.35, W, H)
+  const right = orbitPlacement(0.6, W, H)
+  const top = orbitPlacement(0.85, W, H)
+  check('火箭走位是顺时针一圈',
+    left.x === 0 && bottom.y === H - 16 && right.x === W - 16 && top.y === 0 && bottom.x > left.x && top.x < right.x,
+    JSON.stringify({ left, bottom, right, top }))
 }
 
 // ── 文案完整性 ──────────────────────────────────────────────────────────────

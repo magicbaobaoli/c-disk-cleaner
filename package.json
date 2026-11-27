@@ -1,7 +1,7 @@
 {
   "name": "dsh-cleaner",
-  "version": "0.4.0",
-  "description": "C Disk Cleaner — 右上角一枚小垃圾桶，随时点一下清理 DSH 缓存、释放 C 盘空间。可拖动，清理时按钮亮红光、完成闪绿光。",
+  "version": "0.5.0",
+  "description": "C Disk Cleaner — DSH 里一枚可拖动/居中/贴边的小垃圾桶，随时点一下清理缓存、释放 C 盘空间。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

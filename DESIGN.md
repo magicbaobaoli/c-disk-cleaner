@@ -232,17 +232,59 @@ job.run(queue, t)  // 逐项调 /clean-item，边跑边 notify()
 
 全部动画在 `prefers-reduced-motion: reduce` 下关闭。
 
-## 十、当前状态（2026-11-27）
+## 十、0.5.0 交互修正（用户反馈驱动）
 
-- 版本 **0.4.0**，显示名 **C Disk Cleaner**（包名仍是 `dsh-cleaner`，profile 接线不变）。
-- 测试：client **61** + host **60** + e2e **21** = **142 项全绿**。
-- 四种形态、拖动记忆、面板跟手、右键菜单、隐藏、设置页、半透明、
-  逐项清理动画、后台清理、红光/绿光/陨石/火箭/进度环，全部在真实 GUI 里验收过。
-- 已发布：<https://github.com/magicbaobaoli/c-disk-cleaner>（原 dsh-cleaner 仓库已改名并 301）。
-- 已向上游目录提 PR：<https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/19398>。
+### 拖动卡顿
+
+**原因**：拖动中每个 `pointermove` 都 `setLivePos()` → 重渲染 → 量面板尺寸 →
+再 `setState()`。一帧里几轮布局，主线程直接堵住。
+
+**解法**：拖动一开始就把面板**卸载**（`onDragStart` 里 `setOpen(false)`），
+拖动期间只剩「改按钮的 left/top」——纯合成层操作。松手 `onDragEnd` 再把面板弹回来。
+用户主动提出「拖的时候先收起来，松手再弹出来」，正是这个思路。
+
+### 拖动位置没保存（两个独立原因）
+
+1. **React 重渲染覆盖**：居中用 `left:50% + transform`，拖动时命令式改成
+   `left:<px>`，但下一次重渲染又把样式写回 50%。→ 拖动坐标进 `dragPos` state，
+   渲染时优先用它；松手后 `anchored:false` 一起落盘。
+2. **指针捕获没释放**：`setPointerCapture` 后从不 `releasePointerCapture`，
+   按钮长期抓着指针，后续点击别处都送不到目标。→ `finishDrag` 里显式释放。
+
+### 一次松手被处理两遍
+
+按钮自己挂了 `onPointerUp`，window 兜底监听也挂了一份；第一遍清掉
+`drag.current`，第二遍空跑但把状态盖掉。→ 按钮不再自己处理 pointerup，
+统一走 window；window 监听在 `pointerdown` 里**同步**挂上（用 `handlersRef`
+间接调用，避开 `const` 的 TDZ），否则第一次 pointermove 会赶在 effect 之前丢。
+
+### 面板不再从边缘飞出
+
+原来面板贴在按钮下方，按钮可拖到任意角落 → 面板就从最右侧/最上方冒出来。
+改成**视口居中**，动画只做透明度淡入（不做位移/缩放）。
+
+### 火箭朝向
+
+- 角度表：下=180°、右=90°、上=0°、左=-90°（SVG 本体默认朝上）。
+- **旧 bug**：把「已经插值过的角度」写回 dataset 当基准，导致 `delta` 恒为 0，
+  火箭永远停在 180°。→ 用独立的 `shownAngle` 保持连续性。
+- 抽成 `orbitPlacement(p, w, h)` 纯函数，四方向 + 全程在框内都有单测。
+
+### 单项清理时火箭不动
+
+`done/total` 在只有一项时整段都是 0。→ 「正在清的这一项」算半格，
+`progress = (done + 0.5) / total`（running 时），跑完转满格。
+
+## 十一、当前状态（2026-11-28）
+
+- 版本 **0.5.0**，显示名 **C Disk Cleaner**（包名仍是 `dsh-cleaner`）。
+- 测试：client **66** + host **61** + e2e **23** = **150 项全绿**。
+- 按钮默认**居中**；拖动时面板收起、松手弹回、位置记住。
+- 面板视口居中，淡入淡出。
+- 火箭朝行进方向转（四方向单测覆盖），位置与角度逐帧缓动。
 - **host 半边仍需完全退出 DSH 再打开才生效**；client 刷新页面即可。
 
-## 十一、下一步建议
+## 十二、下一步建议
 
 1. 用户重启 DSH 后确认新形态与新面板。
 2. 想扩清理目标：改 `definitions()`，同步 README/本文件/隐私审计。
