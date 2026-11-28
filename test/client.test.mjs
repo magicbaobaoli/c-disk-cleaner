@@ -333,6 +333,98 @@ if (internals !== undefined) {
   check('中英文案里都带新名字', internals.LEX.zh['app.name'] === 'C Disk Cleaner' && internals.LEX.en['app.name'] === 'C Disk Cleaner')
 }
 
+// ── 面板落位：相对按钮居中，且绝不压住按钮 ──────────────────────────────────
+{
+  const { panelPlacement } = exported.__internals
+  const vp = { w: 1400, h: 800 }
+  const GAP = 10
+
+  // 1) 下方空间充足 → 挂在下方
+  {
+    const anchor = { left: 600, right: 700, top: 100, bottom: 136 }
+    const got = panelPlacement(anchor, 300, vp, 6, GAP)
+    check('下方放得下时，面板挂在按钮下方', got.side === 'below' && got.top === 146, JSON.stringify(got))
+    check('下方放置时不需要限高', got.maxHeight === null)
+  }
+
+  // 2) 下方不够、上方够 → 翻到上方
+  {
+    const anchor = { left: 600, right: 700, top: 600, bottom: 636 }
+    const got = panelPlacement(anchor, 400, vp, 6, GAP)
+    check('下方放不下时翻到按钮上方', got.side === 'above' && got.top === 190, JSON.stringify(got))
+  }
+
+  // 3) 上下都不够 → 必须限高，且限高后不压按钮（这是用户报的核心问题）
+  {
+    const anchor = { left: 600, right: 700, top: 380, bottom: 416 }
+    const got = panelPlacement(anchor, 600, vp, 6, GAP)
+    const height = got.maxHeight === null ? 600 : got.maxHeight
+    const overlaps = !(got.top + height <= anchor.top || got.top >= anchor.bottom)
+    check('上下都放不下时限制高度', got.maxHeight !== null, JSON.stringify(got))
+    check('限高后不压住按钮（否则点不到）', overlaps === false, JSON.stringify({ ...got, height, overlaps }))
+  }
+
+  // 4) 任意位置/高度组合都不能压住按钮
+  {
+    let worst = null
+    for (let top = 6; top <= 700; top += 37) {
+      for (const panelH of [200, 400, 600, 780]) {
+        const anchor = { left: 600, right: 700, top, bottom: top + 36 }
+        const got = panelPlacement(anchor, panelH, vp, 6, GAP)
+        const height = got.maxHeight === null ? panelH : got.maxHeight
+        const overlaps = !(got.top + height <= anchor.top || got.top >= anchor.bottom)
+        if (overlaps) worst = { top, panelH, got, height }
+      }
+    }
+    check('穷举按钮位置/面板高度：从不压住按钮', worst === null, JSON.stringify(worst))
+  }
+
+  // 5) 永远在视口内
+  {
+    let bad = null
+    for (let top = 6; top <= 760; top += 53) {
+      const anchor = { left: 600, right: 700, top, bottom: top + 36 }
+      const got = panelPlacement(anchor, 500, vp, 6, GAP)
+      const height = got.maxHeight === null ? 500 : got.maxHeight
+      if (got.top < 0 || got.top + height > vp.h + 1) bad = { top, got, height }
+    }
+    check('面板始终在视口内', bad === null, JSON.stringify(bad))
+  }
+}
+
+// ── 窗口标题栏拖拽带避让（用户报「按钮点了没反应、拖不动」的根因）──────────
+{
+  const internals = exported.__internals
+  const { clampPosition, dragSafeTop } = internals
+
+  check('浏览器环境（无标题栏）安全顶边只有小间距', dragSafeTop() <= 8, String(dragSafeTop()))
+
+  // 模拟 Windows 桌面端：<html data-windows-titlebar> + 40px 变量
+  sandbox.document.documentElement = {
+    hasAttribute: (name) => name === 'data-windows-titlebar',
+    style: {},
+  }
+  sandbox.getComputedStyle = () => ({
+    getPropertyValue: (name) => (name === '--dsh-windows-titlebar-height' ? '40px' : ''),
+  })
+  const safeTop = dragSafeTop()
+  check('桌面端从 --dsh-windows-titlebar-height 读出 40px 并加安全边距', safeTop >= 46 && safeTop <= 60, String(safeTop))
+
+  // 关键回归：任何 y 都必须被夹到拖拽带下方
+  const cases = [-100, 0, 5, 10, 20, 39, 45]
+  const bad = cases.filter((y) => clampPosition(100, y, { w: 94, h: 34 }).y < safeTop)
+  check('旧配置里落在标题栏的坐标会被夹出拖拽带', bad.length === 0, JSON.stringify({ bad, safeTop }))
+
+  // 居中时的纵向位置也在安全区
+  const cy = internals.centeredTop()
+  check('居中定位也在拖拽带下方', cy >= safeTop, JSON.stringify({ cy, safeTop }))
+
+  // 恢复浏览器沙箱
+  delete sandbox.document.documentElement
+  delete sandbox.getComputedStyle
+  check('无标题栏环境下不会误夹（浏览器里照常）', clampPosition(100, 10, { w: 94, h: 34 }).y <= 10)
+}
+
 // ── 火箭绕框：位置与朝向 ────────────────────────────────────────────────────
 {
   const { orbitPlacement } = exported.__internals

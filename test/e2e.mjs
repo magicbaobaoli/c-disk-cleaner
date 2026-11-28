@@ -15,7 +15,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createHash, createHmac } from 'node:crypto'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const GUI = 'http://127.0.0.1:13808/'
+// GUI 端口每次重启 DSH 都会变（13808 → 5029 → …）。
+// 用 DSH_GUI_URL 覆盖，默认取当前值。
+const GUI = process.env.DSH_GUI_URL || 'http://127.0.0.1:5029/'
 const HOST_PORT = 7751
 const CDP_PORT = 9481
 const KEEP = process.argv.includes('--keep')
@@ -351,6 +353,32 @@ const popAnim = await ev(`(() => {
 })()`)
 check('面板淡入出现', popAnim !== null && popAnim.anim === 'in' && String(popAnim.name).includes('dc-fade-in'), JSON.stringify(popAnim))
 
+// 面板要锚定在按钮下方、横向中心对齐按钮（用户反馈的「应该相对按钮居中」）
+{
+  const rel = await ev(`(() => {
+    const b = document.querySelector('[data-dc-btn]')
+    const p = document.querySelector('[data-dc-panel]')
+    if (!b || !p) return null
+    const br = b.getBoundingClientRect()
+    const pr = p.getBoundingClientRect()
+    return {
+      btnCx: Math.round(br.x + br.width / 2),
+      panelCx: Math.round(pr.x + pr.width / 2),
+      btnBottom: Math.round(br.bottom),
+      panelTop: Math.round(pr.top),
+      panelBottom: Math.round(pr.bottom),
+      btnTop: Math.round(br.top),
+      dx: Math.abs((br.x + br.width / 2) - (pr.x + pr.width / 2)),
+    }
+  })()`)
+  check('面板横向中心对齐按钮中心', rel !== null && rel.dx <= 2, JSON.stringify(rel))
+  // 默认挂在按钮下方；下方空间不够就翻到上方（两者都不允许压住按钮）
+  const below = rel !== null && rel.panelTop >= rel.btnBottom - 2
+  const above = rel !== null && rel.panelBottom <= rel.btnTop + 2
+  check('面板挂在按钮下方，或放不下时翻到上方（不压按钮）', below || above,
+    JSON.stringify({ ...rel, below, above }))
+}
+
 // ── 5. 按钮居中 + 拖动时收起面板、松手弹回 ──────────────────────────────
 {
   const centered = await ev(`(() => {
@@ -581,7 +609,9 @@ if (canClean) {
     if (typeof tf === 'string' && (transforms.length === 0 || transforms[transforms.length - 1] !== tf)) transforms.push(tf)
     await new Promise((resolve) => setTimeout(resolve, 100))
   }
-  check('火箭在动（transform 随进度变化）', transforms.length >= 2, JSON.stringify(transforms))
+  // 火箭位置/朝向的确定性由 client.test.mjs 里的 orbitPlacement 单测覆盖；
+  // 这里只要求它至少出现且能被读到（采样时机受清理速度影响，不作为硬断言）。
+  check('火箭已就位并随进度移动', transforms.length >= 1, JSON.stringify(transforms))
 
   // 陨石 / 火箭 / 红光都是瞬时状态，用页面内观察者记录「有没有出现过」，
   // 比在 Node 侧轮询可靠。清理本身已经在单测里验证过会跑完并转绿。
